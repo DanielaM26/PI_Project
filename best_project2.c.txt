@@ -1,0 +1,398 @@
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <signal.h>
+
+#define SERVER_IP_WEBSITE_ACCESS "2001:470:0:503::2"
+#define MAX_SIZE_BUFF 1024
+#define MAX_SIZE_BUFF_SPECIAL 100
+#define PREDIFINED_PORT_22GSE 22311
+
+// Indicator global pentru a indica închiderea serverului
+
+volatile sig_atomic_t shutdown_flag = 0;
+
+// Functie pentru a gestiona semnalul CTRL+C - Intrerupere Mascabila
+
+void handle_ctrl_c(int sig) {
+    printf("\nServerul se va închide în 15 secunde. Apăsați din nou CTRL+C pentru a forța ieșirea\r\n");
+    shutdown_flag = 1;
+    /* Functia sleep() in C permite utilizatorilor sa astepte un thread curent pentru un anumit timp.*/
+    sleep(15);
+    /*
+    Dupa pauza de 15 secunde, se verifica valoarea variabilei shutdown_flag. 
+    Daca aceasta este incc setata la 1, se afiseaza un mesaj si programul se 
+    incheie cu succes (EXIT_SUCCESS).
+    */
+    if (shutdown_flag) {
+        printf("\nInchidere fortata a Serverului\r\n");
+        /*Functia void exit(int status) incheie procesul de apelare imediat.*/
+        exit(EXIT_SUCCESS);
+    }else
+    {
+        fprintf(stderr, "\nEROARE în gestionarea semnalului CTRL+C!!!Server Neînchis!!!\r\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+/* Functia unde este gestionata comunicarea cu clientul. 
+  client_sock -  socket-ul client creat între statia Windows si serverul nostru Linux, 
+  sockaddr_in - structura de tip client pentru manipularea adreselor de internet */
+
+void client(int client_sock, struct sockaddr_in *client_addr) {
+    // Afiseaza un mesaj de initializare a programului
+    printf("APELAREA FUNCTIEI CLIENT! INITIALIZARE!\r\n");
+
+    // Buffer pentru a stoca și manipula secventa de caractere in memorie primita de la procesul din
+    // Windows pe un IP si un port specific - ENDPOINT
+    char buffer[MAX_SIZE_BUFF];
+
+    // Variabile pentru urmarirea bytes-ilor primiti și IP-ul clientului
+    int bytes_received;
+    char client_ip[INET_ADDRSTRLEN];
+    int receive_function;
+
+    // Conversia adresa IP a clientului intr-un format care poate fi usor citit - Din binar în
+    // format tip „ddd.ddd.ddd.ddd”
+
+    inet_ntop(AF_INET, &(client_addr->sin_addr), client_ip, INET_ADDRSTRLEN);
+   
+    // Afisează informatii despre conexiune (IP client Windows si Port Windows - Acesta din urma
+    // asignat automat de sistemul de operare Windows)
+
+    printf("Conexiune acceptată de la %s:%d\n", client_ip, ntohs(client_addr->sin_port));
+    
+    // In esenta, bucla ruleaza atat timp cat sunt primite cu 
+    // succes date de pe socket-ul asociat clientului
+    while ((bytes_received = recv(client_sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
+        
+        /*Sirurile de bytes terminate in nul marchează sfarsitul unui sir de caractere.*/
+
+        buffer[bytes_received] = '\0';
+        
+        // Afiseaza comanda primita si informatii despre client-ul de IP: Port de unde a fost primit
+        
+        printf("Comandă recepționată de la %s:%d: %s\n", client_ip, ntohs(client_addr->sin_port), buffer);
+
+        // Se verifica daca comanda primita este „02#” si doar în acel moment se porneste tot procesul
+        // de proxy/intermediar efectuat de server, acum el devenind client pentru
+        // alt server in urma trimiterii unui request the GET HTTP la care se primeste un site web
+
+        if (strcmp(buffer, "02#") == 0) {
+
+            // Crearea unui nou socket pentru client - in cazul acesta, este 
+            // serverul Linux care devine client
+            int instance_socket;
+
+            /*
+            socket() creeaza un endpoint (IP:PORT) pentru comunicare si returnează un file descriptor
+            care se refera la acel endpoint
+
+            -> SOCK_STREAM
+                Ofera secvential, fiabil, bidirectional, bazat pe conexiune
+                fluxuri de bytes. Un mecanism de transmisie de date out-of-band
+                poate fi sustinuta.
+            */
+            instance_socket = socket(AF_INET6, SOCK_STREAM, 0);
+
+            // Se verifica daca crearea socketului a avut succes
+            if (instance_socket == -1) {
+                perror("EROARE LA CREARE SOCKET-ului CLIENTULUI!\r\n");
+                // Program incheiat cu eroare - exit(EXIT_FAILURE)
+                // Face flush la toate bufferele din program si inchide toate
+                // programele asociate cu apelarea proiectului/procesului in cauza + sterge 
+                // toate fisierele temporare
+                exit(EXIT_FAILURE);
+            } else
+                printf("Client Socket Creat!\r\n");
+
+            // Specifica adresa serverului pentru noul socket (IPv6) - In acest caz,
+            // serverul alocat echipei noastre era 6init.org, dar din cauza faptului ca
+            // acesta nu prezinta o adresă IPV6, ni s-a zis să folosim site-ul he.net, acesta
+            // avand adresa IPV6. Folositi/consultati programul 
+            //din fisierul ../final/tryhard pentru mai multe detalii
+            
+            /* Toate adresele IP ale site-ului www.he.net:
+                IPv6: 2001:470:0:503::2
+                IPv4: 216.218.236.2
+            */
+
+            /* Toate adresele IP ale site-ului www.6init.org:
+                IPv4: 153.126.158.29
+            */
+
+            struct sockaddr_in6 server_address;
+            server_address.sin6_family = AF_INET6;
+            server_address.sin6_port = htons(80);
+            inet_pton(AF_INET6, SERVER_IP_WEBSITE_ACCESS, &server_address.sin6_addr);
+
+            /*
+            Apelul de sistem connect() conecteaza socket-ul la care face referire
+            file descriptor-ul sockfd (primul argument al functiei) la adresa specificata de addr. 
+            */
+
+            // Conectarea la server
+            if (connect(instance_socket, (struct sockaddr*)&server_address, sizeof(server_address)) == -1) {
+                perror("EROAREA LA CONECTAREA SERVERULUI!\n\n");
+                close(instance_socket);
+                exit(EXIT_FAILURE);
+            } else
+                printf("Conectare Reușită la Serverul Căruia i Se Efectuează Requestul HTTP\n\n");
+
+            // Trimiterea request-ului HTTP GET catre server
+            char *msg = "GET / HTTP/1.0\r\n\r\n";
+            int len = strlen(msg);
+            
+            /*
+            Apelul send() poate fi folosit numai atunci cand socket-ul este in
+            stare conectata (astfel incat destinatarul vizat sa fie cunoscut). 
+            */
+
+            // Se verifica daca operatiunea de trimitere a avut succes
+            if (send(instance_socket, msg, len, 0) == -1) {
+                perror("CLIENT: COMANDA NU A FOST TRIMISA! EROARE!\r\n");
+            } else 
+                printf("CLIENT: COMANDA TRIMISĂ!\r\n");
+
+            // Primirea datelor de la server si salvarea lor într-un fisier numit „index.html”
+            FILE *fp = fopen("index.html", "w+");
+            if (!fp) {
+                perror("EROARE ÎN DESCHIDEREA FIȘIERULUI!\r\n");
+                close(instance_socket);
+                exit(EXIT_FAILURE);
+            }
+
+            char buf[1];
+            int bytes_received;
+            
+            // Scrierea caracter cu caracter in fisier cat timp date sunt primite
+            while ((bytes_received = recv(instance_socket, &buf, 1, 0)) != 0) {
+                if (bytes_received == -1) {
+                    perror("EROARE ÎN RECEPȚIONAREA DATELOR!\r\n");
+                    fclose(fp);
+                    close(instance_socket);
+                    exit(EXIT_FAILURE);
+                }
+                char temp = buf[0];
+                fprintf(fp, "%c", temp);
+            }
+
+            // Inchiderea fisierul dupa primirea datelor
+            if (fclose(fp) != 0) {
+                perror("EROARE ÎN ÎNCHIDEREA FIȘIERULUI!\r\n");
+                exit(EXIT_FAILURE);
+            }
+
+            // Inchiderea socket-ului intre serverul/client (Server HTTP, Client Linux) 
+            // pentru a restrictiona operatiunile ulterioare de trimitere/primire
+            if (shutdown(instance_socket, 2) == 0)
+                printf("\n");
+
+            // Manipulare speciala in alt buffer - Necesar pentru afisarea codului HTML 
+            // in procesul/thread-ul de pe client-ul Windows
+            char special_buffer[MAX_SIZE_BUFF_SPECIAL];
+            char copie_buffer[MAX_SIZE_BUFF_SPECIAL];
+            receive_function = recv(client_sock, special_buffer, sizeof(special_buffer), 0);
+            
+            // Deschidem fisierul „index.html” pentru citire
+            FILE *fd = fopen("index.html", "r");
+            if (!fd) {
+                perror("EROARE ÎN CITIREA FIȘIERULUI!");
+                exit(EXIT_FAILURE);
+            }
+
+            char data[50];
+            int cititorul, comparatie;
+
+            // Verificam daca în buffer e indicat deconectarea clientului cumva
+            comparatie = strncmp(special_buffer, "DISCONNECT", receive_function);
+            if (comparatie == 0) {
+                printf("Din păcate, CLIENT ABRUPT DECONECTAT!!!\n\n");
+                break;
+            } else {
+                // Verifica daca buffer-ul special indică o comanda specifică - 02# în acest caz
+                int noua_comparatie = strncmp(special_buffer, "02#", receive_function);
+                if (noua_comparatie == 0) {
+                    // Trimitem continutul „index.html” catre client în blocuri de 50 de caractere
+                    while ((cititorul = fread(data, 1, 50, fd)) > 0) {
+                        send(client_sock, data, cititorul, 0);
+                    }
+                    fclose(fd);
+
+                    // Modifica si trimite un raspuns catre client pe baza buffer-ului special primit
+                    // unde se indică faptul ca, comanda este implementată
+                    size_t buffer_len = strlen(special_buffer);
+                    if (buffer_len >= 3) {
+                        strncpy(copie_buffer, special_buffer, 3);
+                        copie_buffer[3] = '\0';
+                        strcat(copie_buffer, " este implementata \n");
+                        printf("Comanda Implementa \n");
+                        send(client_sock, copie_buffer, strlen(copie_buffer), 0);
+                    }
+
+                    // Realizam un clear la buffer-ul special folosit
+                    special_buffer[0] = '\0';
+                } else {
+                    // Modifica si trimite un raspuns catre client pe baza buffer-ului special primit
+                    // unde se indica faptul ca, comanda nu este implementata
+                    size_t buffer_len = strlen(special_buffer);
+                    if (buffer_len >= 3) {
+                        strncpy(copie_buffer, special_buffer, 3);
+                        copie_buffer[3] = '\0';
+                        strcat(copie_buffer, " nu este implementata \n");
+                        printf("Comanda nu este implementata \n");
+                        send(client_sock, copie_buffer, strlen(copie_buffer), 0);
+                    }
+
+                    // Realizam un clear la buffer-ul special folosit
+                    special_buffer[0] = '\0';
+                }
+            }
+            printf("Request HTTP GET Trimis și procesul a fost până la capăt executat cu succes!\n");
+        } else {
+            // Raspuns implicit pentru alte comenzi in afara de cel asignat echipei
+            printf("Comanda Implementata: %s\n", buffer);
+            // Trimite un raspuns clientului aferent altor comenzi in afara de cel asignat
+            send(client_sock, "Comanda Nerecunoscuta", strlen("Comanda Nerecunoscuta"), 0);
+        }
+    }
+}
+
+// Funcția Main
+int main() {
+    /*
+    signal() - Stabileste modul in care este gestionat semnalul. 
+    Poate fi configurat sa gestioneze implicit semnalul, sa-l ignore 
+    sau sa apeleze o functie specificata de utilizator, cum ar fi "handle_ctrl_c(int sig)" in acest caz.
+    */
+
+    // Configurarea gestionarii semnalului pentru CTRL+C - Necesar sa fie executat initial
+    signal(SIGINT, handle_ctrl_c);
+
+    printf("Program Inițializat! Nuoah, să îi dăm drumu'\r\n");
+
+    // Variabile pentru a stoca socket-urile de client si server - in acest caz, clientul este Host-ul
+    // cu Windows, iar serverul este Host-ul Linux
+    int server_sock, client_sock;
+    
+    // Crearea unui socket pentru server (IPv4)
+    server_sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    // Verificam daca crearea socket-ului serverului a avut loc cu succes
+    if (server_sock < 0) {
+        perror("EROARE LA CREAREA SOCKET-ului SERVERULUI!\r\n");
+        exit(EXIT_FAILURE);
+    } else
+        printf("Server Socket Creat!\n");
+
+    // Specifica adresa si portul serverului (IPv4)
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PREDIFINED_PORT_22GSE);
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        
+    int yes = 1;
+
+    /*
+    setsockopt() - Necesitatea lui în program ==>
+    Un alt lucru la care trebuie sa fim atenti când apelati bind():
+
+    Uneori, se observa faptul ca se încerca repornirea server-ului și bind() esueaza, 
+    pretinzand „Adresa deja utilizata”. Socket-ul care a fost conectata inca mai "atarna" 
+    in kernel si ocupa portul. Se putea rezolva fie prin asteptare pana cand se sterge, 
+    fie sa adaugam cod la program, permitându-i sa refoloseasca portul
+    */
+
+    // Seteaza opțiunile de socket pentru a evita eroarea „Adresa deja in uz”.
+    if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1) {
+        perror("setsockopt");
+        exit(EXIT_FAILURE);
+    }    
+    
+    int n;
+
+    // Realizam bind pe socket-ul serverului pe adresa si portul specificat
+    n = bind(server_sock, (struct sockaddr*) &server_addr, sizeof(server_addr));
+
+    // Verificam daca bind a fost cu succes
+    if (n < 0) {
+        perror("EROARE DE ASOCIEREA SOCKET-ului!\r\n");
+        exit(EXIT_FAILURE);
+    } else
+        printf("Asociere efectuată! Socket pe Portul %d\n", PREDIFINED_PORT_22GSE);
+    
+    // Ascultam conexiunile pentru cereri de la client
+    int listen_var = listen(server_sock, 10);
+
+    // Verificam daca listen() se realizeaza cu succes
+    if (listen_var == -1) {
+        perror("EROARE ÎN CADRUL LISTENING!\r\n");
+        shutdown(server_sock, 2);
+        exit(EXIT_FAILURE);
+    } else
+        printf("Listen cu succes. Serverul Ascultă pe Portul %d\n", PREDIFINED_PORT_22GSE);
+    
+    // Bucla infinita pentru a accepta continuu conexiunile client de intrare
+    while (1) {
+
+        // Acceptam o conexiune de client
+        client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &client_len);
+
+        // Verificam daca clientul a fost conectat cu succes
+        if (client_sock == -1) {
+            perror("EROARE ACCEPTÂND CONEXIUNI!\r\n");
+            exit(EXIT_FAILURE);
+        } else {
+
+            /*
+            fork() - The multithreading status quo
+
+            fork() creeaza un nou proces duplicând procesul apelant.
+            Noul proces este numit proces copil(child), iar procesul
+            apelant este numit proces parinte(parent).
+
+            Procesul copil si procesul parinte ruleaza in spatii de memorie separate.
+            La momentul fork(), ambele spatii de memorie au continut identic.
+            
+            fork() creeaza un nou proces care este o copie exacta a procesului de apelare. 
+            Noul proces este procesul copil; vechiul proces este procesul parinte. 
+            Copilul primește un ID de proces nou, unic. fork() returneaza un 0 procesului 
+            copil si ID-ul procesului copilului parintelui. Valoarea returnata este modul 
+            in care un program bifurcat determina dacă este procesul parinte sau procesul copil.
+
+            */
+
+            // Gestionarea clientul intr-un proces separat pentru a permite procesarea concomitenta
+            // a multiplilor clienti aparuti
+            pid_t pid = fork();
+            
+            // Verificam daca procesul fork a fost realizat cu succes
+            if (pid == -1) {
+                perror("EROARE ÎN PROCESUL DE MULTITHREADING!!!\r\n");
+                close(client_sock);
+            } else if (pid == 0) {
+                // Procesul Child servește clientul
+                client(client_sock, &client_addr);
+                close(server_sock); // Închidem procesul child
+            } else {
+                // Procesul parinte continua sa accepte conexiuni
+                close(client_sock); // inchidem procesul parinte
+            }
+        } 
+    }
+
+    // Inchidem socket-ul serverului
+    if (shutdown(server_sock, 2) == 0)
+        printf("Shutdown Server Socket\n");
+
+    return 0;
+
+    // END OF PROGRAM
+}
